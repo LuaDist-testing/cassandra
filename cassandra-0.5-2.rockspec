@@ -1,16 +1,16 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "cassandra"
-version = "0.5-1"
+version = "0.5-2"
 -- LuaDist source
 source = {
-  tag = "0.5-1",
+  tag = "0.5-2",
   url = "git://github.com/LuaDist-testing/cassandra.git"
 }
 -- Original source
 -- source = {
 --    url = "git://github.com/jbochi/lua-resty-cassandra",
---    tag = "v0.5"
+--    tag = "v0.5-2"
 -- }
 description = {
    summary = "Pure Lua Cassandra - CQL client",
@@ -28,6 +28,10 @@ build = {
    type = "builtin",
    modules = {
       cassandra = "src/cassandra.lua",
+      ["cassandra.constants"] = "src/constants.lua",
+      ["cassandra.protocol"] = "src/protocol.lua",
+      ["cassandra.decoding"] = "src/decoding.lua",
+      ["cassandra.encoding"] = "src/encoding.lua"
    },
    copy_directories = { "spec" }
 }
