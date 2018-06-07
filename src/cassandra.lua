@@ -1,15 +1,5 @@
 -- Implementation of CQL Binary protocol V2 available at https://git-wip-us.apache.org/repos/asf?p=cassandra.git;a=blob_plain;f=doc/native_protocol_v2.spec;hb=HEAD
 
-local tcp
-if ngx then
-    -- openresty
-    tcp = ngx.socket.tcp
-else
-    -- fallback to luasocket
-    local socket = require("socket")
-    tcp = socket.tcp
-end
-
 local _M = {}
 
 _M.version = "0.0.1"
@@ -133,6 +123,18 @@ end
 
 function _M.new(self)
     math.randomseed(ngx and ngx.time() or os.time())
+
+    local tcp
+    if ngx and ngx.get_phase() ~= "init" then
+        -- openresty
+        tcp = ngx.socket.tcp
+    else
+        -- fallback to luasocket
+        -- It's also a fallback for openresty in the
+        -- "init" phase that doesn't support Cosockets
+        tcp = require("socket").tcp
+    end
+
     local sock, err = tcp()
     if not sock then
         return nil, err
@@ -473,6 +475,18 @@ local function value_representation(value, short)
     return bytes_representation(representation)
 end
 _M._value_representation = value_representation
+
+local function values_representation(args)
+  if not args then
+    return ""
+  end
+  local values = {}
+  values[#values + 1] = short_representation(#args)
+  for _, value in ipairs(args) do
+    values[#values + 1] = value_representation(value)
+  end
+  return table.concat(values)
+end
 
 ---
 --- DECODE FUNCTIONS
@@ -858,6 +872,36 @@ local function parse_rows(buffer, metadata)
     return values
 end
 
+local batch_statement = {
+  __index = {
+    add = function(self, query, args)
+      table.insert(self.queries, {query=query, args=args})
+    end,
+    representation = function(self)
+      local b = {}
+      b[#b + 1] = string.char(0) -- todo: logged/unlogged/counter
+      b[#b + 1] = short_representation(#self.queries)
+      for _, query in ipairs(self.queries) do
+        local kind
+        local string_or_id
+        if type(query.query) == "string" then
+          kind = string.char("0")
+          string_or_id = long_string_representation(query.query)
+        else
+          kind = string.char("1")
+          string_or_id = short_bytes_representation(query.query.id)
+        end
+        b[#b + 1] = kind .. string_or_id .. values_representation(query.args)
+      end
+      return table.concat(b)
+    end
+  }
+}
+
+function _M.BatchStatement(self)
+  return setmetatable({queries={}}, batch_statement)
+end
+
 function _M.prepare(self, query, options)
     if not options then options = {} end
     local body = long_string_representation(query)
@@ -894,6 +938,9 @@ function _M.execute(self, query, args, options)
     if type(query) == "string" then
         op_code = op_codes.QUERY
         query_repr = long_string_representation(query)
+    elseif getmetatable(query) == batch_statement then
+        op_code = op_codes.BATCH
+        query_repr = query:representation()
     else
         op_code = op_codes.EXECUTE
         query_repr = short_bytes_representation(query.id)
@@ -905,14 +952,10 @@ function _M.execute(self, query, args, options)
         flags = string.char(0)
     else
         flags = string.char(1)
-        values[#values + 1] = short_representation(#args)
-        for _, value in ipairs(args) do
-            values[#values + 1] = value_representation(value)
-        end
     end
 
     local query_parameters = short_representation(options.consistency_level) .. flags
-    local body = query_repr .. query_parameters .. table.concat(values)
+    local body = query_repr .. query_parameters .. values_representation(args)
     local response, err = send_reply_and_get_response(self, op_code, body, options.tracing)
     if not response then
         return nil, err
