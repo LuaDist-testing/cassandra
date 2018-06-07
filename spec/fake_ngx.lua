@@ -1,6 +1,9 @@
 socket = require("socket")
 
 return {
-    socket=socket,
-    time=os.time
+  get_phase = function()
+                return ""
+              end,
+  socket=socket,
+  time=os.time
 }
