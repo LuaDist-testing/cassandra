@@ -96,7 +96,7 @@ Connects to a single or multiple hosts at the given port.
 > * `ok`: true if connected, false otherwise. Nil of the session doesn't have a socket.
 > * `err`: Any encountered error.
 
-### ok, err = session:setkeepalive(max_idle_timeout, pool_size)  -- Nginx only
+### ok, err = session:set_keepalive(max_idle_timeout, pool_size)  -- Nginx only
 
 Puts the current Cassandra connection immediately into the ngx_lua cosocket connection pool.
 
@@ -133,6 +133,14 @@ Closes the current connection and returns the status.
 > * `err`: Encountered error if any
 
 ## Client methods
+
+All errors returned by functions in this section are tables with the following properties:
+
+> * `code`: A string from one of the `error_codes` in `cassandra.contants`.
+> * `raw_message`: The error message being returned by Cassandra.
+> * `message`: A constructed error message with `code` + `raw_message`.
+
+Error tables implement the `__tostring` method and are thus printable. A stringified error table will outputs its `message` property.
 
 ### ok, err = session:set_keyspace(keyspace_name)
 
@@ -325,7 +333,7 @@ Marco Palladino (@thefosk)
 [badge-coveralls-url]: https://coveralls.io/r/jbochi/lua-resty-cassandra?branch=master
 [badge-coveralls-image]: https://coveralls.io/repos/jbochi/lua-resty-cassandra/badge.svg?branch=master
 
-[badge-version-image]: https://img.shields.io/badge/version-0.5--4-green.svg?style=flat
+[badge-version-image]: https://img.shields.io/badge/version-0.5--5-green.svg?style=flat
 
 [luarocks-url]: https://luarocks.org
 

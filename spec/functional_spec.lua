@@ -2,6 +2,7 @@ package.path = "src/?.lua;spec/?.lua;" .. package.path
 
 _G.ngx = require("fake_ngx")
 local cassandra = require("cassandra")
+local constants = require("cassandra.constants")
 
 describe("cassandra", function()
 
@@ -180,9 +181,16 @@ describe("cassandra", function()
   end)
 
   describe("Keyspace", function()
-    it("should catch errors", function()
+    it("should catch (rich) errors", function()
       local ok, err = session:set_keyspace("invalid_keyspace")
-      assert.same([[Cassandra returned error (Invalid): "Keyspace 'invalid_keyspace' does not exist"]], err)
+      assert.same(constants.error_codes.INVALID, err.code)
+      assert.same("Keyspace 'invalid_keyspace' does not exist", err.raw_message)
+      assert.same([[Cassandra returned error (Invalid): "Keyspace 'invalid_keyspace' does not exist"]], tostring(err))
+
+      -- Test concatenation of an error
+      assert.same([[Cassandra returned error (Invalid): "Keyspace 'invalid_keyspace' does not exist"]] .. "foo", err .. "foo")
+      assert.same("foo" .. [[Cassandra returned error (Invalid): "Keyspace 'invalid_keyspace' does not exist"]], "foo" .. err)
+      assert.same([[Cassandra returned error (Invalid): "Keyspace 'invalid_keyspace' does not exist"]]..[[Cassandra returned error (Invalid): "Keyspace 'invalid_keyspace' does not exist"]], err .. err)
     end)
 
     it("should be possible to use a namespace", function()
@@ -227,7 +235,9 @@ describe("cassandra", function()
           )
         ]]
         assert.is_not_true(table_created)
-        assert.same('Cassandra returned error (Already_exists): "Cannot add already existing column family "users" to keyspace "lua_tests""', err)
+        assert.same(constants.error_codes.ALREADY_EXISTS, err.code)
+        assert.same('Cannot add already existing column family "users" to keyspace "lua_tests"', err.raw_message)
+        assert.same('Cassandra returned error (Already_exists): "Cannot add already existing column family "users" to keyspace "lua_tests""', tostring(err))
       end)
     end)
 
@@ -262,7 +272,7 @@ describe("cassandra", function()
           INSERT INTO users (name, age, user_id)
           VALUES ('John O''Reilly', 42, 2644bada-852c-11e3-89fb-e0b9a54a6d93)
         ]], {}, {consistency_level=cassandra.consistency.TWO})
-        assert.same('Cassandra returned error (Unavailable exception): "Cannot achieve consistency level TWO"', err)
+        assert.same('Cassandra returned error (Unavailable exception): "Cannot achieve consistency level TWO"', tostring(err))
       end)
 
       it("should support queries with arguments", function()
