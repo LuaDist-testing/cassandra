@@ -3,6 +3,7 @@
 [![Build Status][badge-travis-image]][badge-travis-url]
 [![Coverage Status][badge-coveralls-image]][badge-coveralls-url]
 ![Module Version][badge-version-image]
+[![Join the chat at https://gitter.im/jbochi/lua-resty-cassandra](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/jbochi/lua-resty-cassandra?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 Pure Lua Cassandra client using CQL binary protocol v2.
 
@@ -333,7 +334,7 @@ Marco Palladino (@thefosk)
 [badge-coveralls-url]: https://coveralls.io/r/jbochi/lua-resty-cassandra?branch=master
 [badge-coveralls-image]: https://coveralls.io/repos/jbochi/lua-resty-cassandra/badge.svg?branch=master
 
-[badge-version-image]: https://img.shields.io/badge/version-0.5--5-green.svg?style=flat
+[badge-version-image]: https://img.shields.io/badge/version-0.5--6-green.svg?style=flat
 
 [luarocks-url]: https://luarocks.org
 
