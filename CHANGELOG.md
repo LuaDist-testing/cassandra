@@ -2,6 +2,17 @@
 #### Added
 #### Fixed
 
+## [0.5-4] - 2015/03/04
+#### Added
+- Better travis configuration (coverage, lua 5.1, 5.2 and luajit)
+
+#### Fixed
+- `auto_pagination` option not returning the latest page in most cases
+
+## [0.5-3] - 2015/03/01
+#### Fixed
+- Tests (file structure)
+
 ## [0.5-2] - 2015/02/24
 #### Fixed
 - Installation (missing rockspec files)
@@ -37,12 +48,13 @@
 - Add support for tracing on write (#2).
 
 #### Fixed
-- Calls to `setkeepalive` anf `getreusedtimes` while using luasocket now return an error.
+- Calls to `setkeepalive` and `getreusedtimes` while using luasocket now return an error.
 
 ## 0.1 - 2014-07-26
 - First release.
 
-[unreleased]: https://github.com/jbochi/lua-resty-cassandra/compare/v0.5-2...HEAD
+[unreleased]: https://github.com/jbochi/lua-resty-cassandra/compare/v0.5-3...HEAD
+[0.5-3]: https://github.com/jbochi/lua-resty-cassandra/compare/v0.5-3...v0.5-2
 [0.5-2]: https://github.com/jbochi/lua-resty-cassandra/compare/v0.5...v0.5-2
 [0.5]: https://github.com/jbochi/lua-resty-cassandra/compare/v0.4...v0.5
 [0.4]: https://github.com/jbochi/lua-resty-cassandra/compare/v0.3...v0.4
