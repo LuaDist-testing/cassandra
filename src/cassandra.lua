@@ -137,6 +137,10 @@ end
 
 function _M.connect(self, host, port)
     if port == nil then port = 9042 end
+    if type(host) == 'table' then
+        -- if host is a list, choose a random item
+        host = host[math.random(#host)]
+    end
     local sock = self.sock
     if not sock then
         return nil, "not initialized"
@@ -145,15 +149,22 @@ function _M.connect(self, host, port)
     if not ok then
         return false, err
     end
-    return self:startup()
+    if not self.initialized then
+        --todo: not tested
+        self:startup()
+        self.initialized = true
+    end
+    return true
 end
 
 function _M.set_keepalive(self, ...)
     local sock = self.sock
     if not sock then
         return nil, "not initialized"
+    elseif sock.setkeepalive then
+        return sock:setkeepalive(...)
     end
-    return sock:setkeepalive(...)
+    return nil, "luasocket does not support reusable sockets"
 end
 
 
@@ -161,9 +172,10 @@ function _M.get_reused_times(self)
     local sock = self.sock
     if not sock then
         return nil, "not initialized"
+    elseif sock.getreusedtimes then
+        return sock:getreusedtimes()
     end
-
-    return sock:getreusedtimes()
+    return nil, "luasocket does not support reusable sockets"
 end
 
 
@@ -502,7 +514,7 @@ local function read_short_bytes(buffer)
     return read_raw_bytes(buffer, size)
 end
 
-local function read_option(bufffer)
+local function read_option(buffer)
     local type_id = read_short(buffer)
     local type_value = nil
     if type_id == types.custom then
@@ -676,7 +688,7 @@ local function read_error(buffer)
     return 'Cassandra returned error (' .. error_code .. '): "' .. error_message .. '"'
 end
 
-local function read_frame(self)
+local function read_frame(self, tracing)
     local header, err, partial = self.sock:receive(8)
     if not header then
         return nil, "Failed to read frame header: " .. err
@@ -687,7 +699,7 @@ local function read_frame(self)
     local stream = read_raw_byte(header_buffer)
     local op_code = read_raw_byte(header_buffer)
     local length = read_int(header_buffer)
-    local body, err, partial
+    local body, err, partial, tracing_id
     if length > 0 then
         body, err, partial = self.sock:receive(length)
         if not body then
@@ -700,6 +712,10 @@ local function read_frame(self)
         error("Invalid response version")
     end
     local body_buffer = create_buffer(body)
+    if flags == 0x02 then -- tracing
+        tracing_id = read_uuid(string.sub(body, 1, 16))
+        body_buffer.pos = 17
+    end
     if op_code == op_codes.ERROR then
         return nil, read_error(body_buffer)
     end
@@ -707,7 +723,8 @@ local function read_frame(self)
         flags=flags,
         stream=stream,
         op_code=op_code,
-        buffer=body_buffer
+        buffer=body_buffer,
+        tracing_id=tracing_id
     }
 end
 
@@ -716,11 +733,11 @@ end
 --- http://ricilake.blogspot.com.br/2007/10/iterating-bits-in-lua.html
 ---
 
-function bit(p)
+local function bit(p)
   return 2 ^ (p - 1)
 end
 
-function hasbit(x, p)
+local function hasbit(x, p)
   return x % (p + p) >= p
 end
 
@@ -728,9 +745,9 @@ end
 --- CLIENT METHODS
 ---
 
-local function send_reply_and_get_response(self, op_code, body)
+local function send_reply_and_get_response(self, op_code, body, tracing)
     local version = string.char(version_codes.REQUEST)
-    local flags = '\000'
+    local flags = tracing and '\002' or '\000'
     local stream_id = '\000'
     local length = int_representation(#body)
     local frame = version .. flags .. stream_id .. string.char(op_code) .. length .. body
@@ -772,7 +789,7 @@ local function parse_metadata(buffer)
     end
     local columns = {}
     for j = 1, columns_count do
-        local ksname = global_ksname
+        local ksname = global_keyspace_name
         local tablename = global_tablename
         if not global_tables_spec then
             ksname = read_string(buffer)
@@ -817,7 +834,7 @@ function _M.prepare(self, query)
     if response.op_code ~= op_codes.RESULT then
         error("Result expected")
     end
-    buffer = response.buffer
+    local buffer = response.buffer
     local kind = read_int(buffer)
     if kind == result_kinds.PREPARED then
         local id = read_short_bytes(buffer)
@@ -830,9 +847,10 @@ function _M.prepare(self, query)
     end
 end
 
-function _M.execute(self, query, args, consistency_level)
-    if not consistency_level then
-        consistency_level = consistency.ONE
+function _M.execute(self, query, args, options)
+    if not options then options = {} end
+    if not options.consistency_level then
+        options.consistency_level = consistency.ONE
     end
 
     local op_code, query_repr
@@ -845,6 +863,7 @@ function _M.execute(self, query, args, consistency_level)
     end
 
     local values = {}
+    local flags
     if not args then
         flags = string.char(0)
     else
@@ -855,9 +874,9 @@ function _M.execute(self, query, args, consistency_level)
         end
     end
 
-    local query_parameters = short_representation(consistency_level) .. flags
+    local query_parameters = short_representation(options.consistency_level) .. flags
     body = query_repr .. query_parameters .. table.concat(values)
-    local response, err = send_reply_and_get_response(self, op_code, body)
+    local response, err = send_reply_and_get_response(self, op_code, body, options.tracing)
     if not response then
         return nil, err
     end
@@ -865,10 +884,10 @@ function _M.execute(self, query, args, consistency_level)
     if response.op_code ~= op_codes.RESULT then
         error("Result expected")
     end
-    buffer = response.buffer
+    local buffer = response.buffer
     local kind = read_int(buffer)
     if kind == result_kinds.VOID then
-        return true
+        return response.tracing_id and {tracing_id=response.tracing_id} or true
     elseif kind == result_kinds.ROWS then
         local metadata = parse_metadata(buffer)
         return parse_rows(buffer, metadata)
@@ -881,7 +900,7 @@ function _M.execute(self, query, args, consistency_level)
         local table = read_string(buffer)
         return keyspace .. "." .. table .. " " .. change
     else
-        error("Invalid result kind")
+        error(string.format("Invalid result kind: %x", kind))
     end
 end
 
