@@ -114,11 +114,25 @@ local error_codes = {
 
 local mt = { __index = _M }
 
+-- see: http://en.wikipedia.org/wiki/Fisher-Yates_shuffle
+local function shuffle(t)
+  local n = #t
+  while n >= 2 do
+    -- n is now the last pertinent index
+    local k = math.random(n) -- 1 <= k <= n
+    -- Quick swap
+    t[n], t[k] = t[k], t[n]
+    n = n - 1
+  end
+  return t
+end
+
 ---
 --- SOCKET METHODS
 ---
 
 function _M.new(self)
+    math.randomseed(ngx and ngx.time() or os.time())
     local sock, err = tcp()
     if not sock then
         return nil, err
@@ -135,17 +149,25 @@ function _M.set_timeout(self, timeout)
     return sock:settimeout(timeout)
 end
 
-function _M.connect(self, host, port)
+function _M.connect(self, contact_points, port)
     if port == nil then port = 9042 end
-    if type(host) == 'table' then
-        -- if host is a list, choose a random item
-        host = host[math.random(#host)]
+    if type(contact_points) == 'table' then
+        shuffle(contact_points)
+    else
+        contact_points = {contact_points}
     end
     local sock = self.sock
     if not sock then
         return nil, "not initialized"
     end
-    local ok, err = sock:connect(host, port)
+    local ok, err
+    for _, host in ipairs(contact_points) do
+        ok, err = sock:connect(host, port)
+        if ok then
+            self.host = host
+            break
+        end
+    end
     if not ok then
         return false, err
     end
@@ -349,7 +371,7 @@ end
 local function inet_representation(value)
     local digits = {}
     -- ipv6
-    for d in string.gfind(value, "([^:]+)") do
+    for d in string.gmatch(value, "([^:]+)") do
         if #d == 4 then
             for i = 1, #d, 2 do
                 digits[#digits + 1] = string.char(tonumber(string.sub(d, i, i + 1), 16))
@@ -358,7 +380,7 @@ local function inet_representation(value)
     end
     -- ipv4
     if #digits == 0 then
-        for d in string.gfind(value, "(%d+)") do
+        for d in string.gmatch(value, "(%d+)") do
             table.insert(digits, string.char(d))
         end
     end
@@ -691,7 +713,7 @@ end
 local function read_frame(self, tracing)
     local header, err, partial = self.sock:receive(8)
     if not header then
-        return nil, "Failed to read frame header: " .. err
+        return nil, string.format("Failed to read frame header from %s: %s", self.host, err)
     end
     local header_buffer = create_buffer(header)
     local version = read_raw_byte(header_buffer)
@@ -703,7 +725,7 @@ local function read_frame(self, tracing)
     if length > 0 then
         body, err, partial = self.sock:receive(length)
         if not body then
-            return nil, "Failed to read frame body: " .. err
+            return nil, string.format("Failed to read frame body from %s: %s", self.host, err)
         end
     else
         body = ""
@@ -754,7 +776,7 @@ local function send_reply_and_get_response(self, op_code, body, tracing)
 
     local bytes, err = self.sock:send(frame)
     if not bytes then
-        return nil, "Failed to send data to cassandra: " .. err
+        return nil, string.format("Failed to read frame header from %s: %s", self.host, err)
     end
     return read_frame(self)
 end
@@ -766,7 +788,7 @@ function _M.startup(self)
         return nil, err
     end
     if response.op_code ~= op_codes.READY then
-        return nil, "Server is not ready"
+        error("Server is not ready")
     end
     return true
 end
@@ -790,7 +812,7 @@ local function parse_metadata(buffer)
     local columns = {}
     for j = 1, columns_count do
         local ksname = global_keyspace_name
-        local tablename = global_tablename
+        local tablename = global_table_name
         if not global_tables_spec then
             ksname = read_string(buffer)
             tablename = read_string(buffer)
@@ -812,11 +834,22 @@ local function parse_rows(buffer, metadata)
     local columns_count = metadata.columns_count
     local rows_count = read_int(buffer)
     local values = {}
+    local row_mt = {
+      __index = function(t, i)
+        -- allows field access by position/index, not column name only
+        local column = columns[i]
+        if column then
+          return t[column.name]
+        end
+        return nil
+      end,
+      __len = function() return columns_count end
+    }
     for i = 1, rows_count do
         local row = {}
+        setmetatable(row, row_mt)
         for j = 1, columns_count do
             local value = read_value(buffer, columns[j].type)
-            row[j] = value
             row[columns[j].name] = value
         end
         values[#values + 1] = row
@@ -825,9 +858,10 @@ local function parse_rows(buffer, metadata)
     return values
 end
 
-function _M.prepare(self, query)
+function _M.prepare(self, query, options)
+    if not options then options = {} end
     local body = long_string_representation(query)
-    local response, err = send_reply_and_get_response(self, op_codes.PREPARE, body)
+    local response, err = send_reply_and_get_response(self, op_codes.PREPARE, body, options.tracing)
     if not response then
         return nil, err
     end
@@ -836,15 +870,18 @@ function _M.prepare(self, query)
     end
     local buffer = response.buffer
     local kind = read_int(buffer)
+    local result = {}
     if kind == result_kinds.PREPARED then
         local id = read_short_bytes(buffer)
         local metadata = parse_metadata(buffer)
         local result_metadata = parse_metadata(buffer)
         assert(buffer.pos == #(buffer.str) + 1)
-        return {id=id, metadata=metadata, result_metadata=result_metadata}
+        result = {type="PREPARED", id=id, metadata=metadata, result_metadata=result_metadata}
     else
         error("Invalid result kind")
     end
+    if response.tracing_id then result.tracing_id = response.tracing_id end
+    return result
 end
 
 function _M.execute(self, query, args, options)
@@ -875,7 +912,7 @@ function _M.execute(self, query, args, options)
     end
 
     local query_parameters = short_representation(options.consistency_level) .. flags
-    body = query_repr .. query_parameters .. table.concat(values)
+    local body = query_repr .. query_parameters .. table.concat(values)
     local response, err = send_reply_and_get_response(self, op_code, body, options.tracing)
     if not response then
         return nil, err
@@ -884,28 +921,61 @@ function _M.execute(self, query, args, options)
     if response.op_code ~= op_codes.RESULT then
         error("Result expected")
     end
+    local result
     local buffer = response.buffer
     local kind = read_int(buffer)
     if kind == result_kinds.VOID then
-        return response.tracing_id and {tracing_id=response.tracing_id} or true
+        result = {type="VOID"}
     elseif kind == result_kinds.ROWS then
         local metadata = parse_metadata(buffer)
-        return parse_rows(buffer, metadata)
+        result = parse_rows(buffer, metadata)
+        result.type = "ROWS"
     elseif kind == result_kinds.SET_KEYSPACE then
-        local keyspace = read_string(buffer)
-        return keyspace
+        result = {
+            type="SET_KEYSPACE",
+            keyspace= read_string(buffer)
+        }
     elseif kind == result_kinds.SCHEMA_CHANGE then
-        local change = read_string(buffer)
-        local keyspace = read_string(buffer)
-        local table = read_string(buffer)
-        return keyspace .. "." .. table .. " " .. change
+        result = {
+            type="SCHEMA_CHANGE",
+            change=read_string(buffer),
+            keyspace=read_string(buffer),
+            table=read_string(buffer)
+        }
     else
         error(string.format("Invalid result kind: %x", kind))
     end
+    if response.tracing_id then result.tracing_id = response.tracing_id end
+    return result
 end
 
 function _M.set_keyspace(self, keyspace_name)
     return self:execute("USE " .. keyspace_name)
+end
+
+function _M.get_trace(self, result)
+    if not result.tracing_id then
+        return nil, "No tracing available"
+    end
+    local rows, err = self:execute([[
+        SELECT coordinator, duration, parameters, request, started_at
+          FROM  system_traces.sessions WHERE session_id = ?]],
+        {_M.uuid(result.tracing_id)})
+    if not rows then
+        return nil, "Unable to get trace: " .. err
+    end
+    if #rows == 0 then
+        return nil, "Trace not found"
+    end
+    local trace = rows[1]
+    trace.events, err = self:execute([[
+        SELECT event_id, activity, source, source_elapsed, thread
+          FROM system_traces.events WHERE session_id = ?]],
+        {_M.uuid(result.tracing_id)})
+    if not trace.events then
+        return nil, "Unable to get trace events: " .. err
+    end
+    return trace
 end
 
 return _M

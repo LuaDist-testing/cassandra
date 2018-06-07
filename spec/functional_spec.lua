@@ -1,4 +1,4 @@
-package.path = package.path .. ";spec/?.lua"
+package.path = "src/?.lua;spec/?.lua;" .. package.path
 ngx = require("fake_ngx")
 local cassandra = require("cassandra")
 
@@ -31,18 +31,89 @@ describe("cassandra", function()
     assert.truthy(connected)
   end)
 
-  it("should be queryable", function()
-    local rows, err = session:execute("SELECT cql_version, native_protocol_version, release_version FROM system.local");
-    assert.same(1, #rows)
-    assert.same(rows[1].native_protocol_version, "2")
+  it("should try another host if it fails to connect", function()
+    local new_session = cassandra.new()
+    new_session:set_timeout(1000)
+    local connected, err = new_session:connect({"0.0.0.1", "0.0.0.2", "0.0.0.3", "127.0.0.1"})
+    assert.truthy(connected)
+    assert.falsy(err)
+  end)
+
+  it("should return error if it fails to connect to all hosts", function()
+    local new_session = cassandra.new()
+    new_session:set_timeout(1000)
+    local connected, err = new_session:connect({"0.0.0.1", "0.0.0.2", "0.0.0.3"})
+    assert.falsy(connected)
+    assert.truthy(err)
+  end)
+
+
+
+  describe("query result", function()
+    local rows, err
+
+    before_each(function()
+      rows, err = session:execute("SELECT cql_version, native_protocol_version, release_version FROM system.local", {}, {tracing=true})
+    end)
+
+    it("should have a length", function()
+      assert.same(1, #rows)
+    end)
+
+    describe("a row", function()
+      local row
+
+      before_each(function()
+        row = rows[1]
+      end)
+
+      it("should be acessible by column name", function()
+        assert.truthy(row.native_protocol_version == "2" or row.native_protocol_version == "3")
+      end)
+
+      it("should be acessible by position", function()
+        assert.same(row[1], row.cql_version)
+        assert.same(row[2], row.native_protocol_version)
+        assert.same(row[3], row.release_version)
+      end)
+
+      if (_VERSION >= "Lua 5.2") then
+        it("should have the correct number of columns", function()
+          assert.same(#row, 3)
+        end)
+      end
+
+      it("should be iterable by key and value", function()
+        local columns = {cql_version="cql_version",
+                         native_protocol_version="native_protocol_version",
+                         release_version="release_version"}
+        local n_columns = 0
+        for key, _ in pairs(row) do
+          assert.same(columns[key], key)
+          n_columns = n_columns + 1
+        end
+        assert.same(n_columns, 3)
+      end)
+    end)
+  end)
+
+  it("should be queryable with tracing", function()
+    local rows, err = session:execute("SELECT cql_version, native_protocol_version, release_version FROM system.local", {}, {tracing=true})
+    assert.truthy(rows.tracing_id)
   end)
 
   it("should support prepared statements", function()
-    local stmt, err = session:prepare("SELECT native_protocol_version FROM system.local");
+    local stmt, err = session:prepare("SELECT native_protocol_version FROM system.local")
     assert.truthy(stmt)
     local rows = session:execute(stmt)
     assert.same(1, #rows)
-    assert.same(rows[1].native_protocol_version, "2")
+    assert.truthy(rows[1].native_protocol_version == "2" or rows[1].native_protocol_version == "3")
+  end)
+
+  it("should support tracing for prepared statements", function()
+    local stmt, err = session:prepare("SELECT native_protocol_version FROM system.local", {tracing=true})
+    assert.truthy(stmt)
+    assert.truthy(stmt.tracing_id)
   end)
 
   it("should catch errors", function()
@@ -72,7 +143,7 @@ describe("cassandra", function()
     end)
 
     it("should be possible to be created", function()
-      assert.same("lua_tests.users CREATED", table_created)
+      assert.same("users", table_created.table)
     end)
 
     it("should not be possible to be created again", function()
@@ -102,12 +173,10 @@ describe("cassandra", function()
       local result, err = session:execute(query, {}, {tracing=true})
       assert.truthy(result)
       assert.truthy(result.tracing_id)
-      local tracing, err = session:execute(
-        "SELECT * from system_traces.sessions where session_id = ?",
-        {cassandra.uuid(result.tracing_id)}
-      );
-      assert.same(1, #tracing)
-      assert.truthy(query, tracing[1].query)
+      local tracing, err = session:get_trace(result)
+      assert.truthy(query, tracing.query)
+      assert.truthy(tracing.started_at > 0)
+      assert.truthy(#tracing.events > 0)
     end)
 
     it("should be possible to set consistency level", function()
@@ -134,15 +203,15 @@ describe("cassandra", function()
   end)
 
   local types = {
-    {name='ascii', insert_value='string', read_value='string'},
+    {name='ascii', value='string'},
     {name='ascii', insert_value=cassandra.null, read_value=nil},
     {name='bigint', insert_value=cassandra.bigint(42000000000), read_value=42000000000},
     {name='bigint', insert_value=cassandra.bigint(-42000000000), read_value=-42000000000},
     {name='bigint', insert_value=cassandra.bigint(-42), read_value=-42},
-    {name='blob', insert_value="\005\042", read_value="\005\042"},
-    {name='blob', insert_value=string.rep("blob", 10000), read_value=string.rep("blob", 10000)},
-    {name='boolean', insert_value=true, read_value=true},
-    {name='boolean', insert_value=false, read_value=false},
+    {name='blob', value="\005\042"},
+    {name='blob', value=string.rep("blob", 10000)},
+    {name='boolean', value=true},
+    {name='boolean', value=false},
     -- counters are not here because they are used with UPDATE instead of INSERT
     -- todo: decimal,
     {name='double', insert_value=cassandra.double(1.0000000000000004), read_test=function(value) return math.abs(value - 1.0000000000000004) < 0.000000000000001 end},
@@ -154,15 +223,15 @@ describe("cassandra", function()
     {name='float', insert_value=cassandra.float(0), read_test=function(value) return math.abs(value - 0) < 0.0000001 end},
     {name='float', insert_value=-3.14151, read_test=function(value) return math.abs(value + 3.14151) < 0.0000001 end},
     {name='float', insert_value=cassandra.float(314151), read_test=function(value) return math.abs(value - 314151) < 0.0000001 end},
-    {name='int', insert_value=4200, read_value=4200},
-    {name='int', insert_value=-42, read_value=-42},
-    {name='text', insert_value='string', read_value='string'},
+    {name='int', value=4200},
+    {name='int', value=-42},
+    {name='text', value='string'},
     {name='timestamp', insert_value=cassandra.timestamp(1405356926), read_value=1405356926},
     {name='uuid', insert_value=cassandra.uuid("1144bada-852c-11e3-89fb-e0b9a54a6d11"), read_value="1144bada-852c-11e3-89fb-e0b9a54a6d11"},
-    {name='varchar', insert_value='string', read_value='string'},
-    {name='blob', insert_value=string.rep("string", 10000), read_value=string.rep("string", 10000)},
-    {name='varint', insert_value=4200, read_value=4200},
-    {name='varint', insert_value=-42, read_value=-42},
+    {name='varchar', value='string'},
+    {name='blob', value=string.rep("string", 10000)},
+    {name='varint', value=4200},
+    {name='varint', value=-42},
     {name='timeuuid', insert_value=cassandra.uuid("1144bada-852c-11e3-89fb-e0b9a54a6d11"), read_value="1144bada-852c-11e3-89fb-e0b9a54a6d11"},
     {name='inet', insert_value=cassandra.inet("127.0.0.1"), read_value="127.0.0.1"},
     {name='inet', insert_value=cassandra.inet("2001:0db8:85a3:0042:1000:8a2e:0370:7334"), read_value="2001:0db8:85a3:0042:1000:8a2e:0370:7334"},
@@ -189,14 +258,14 @@ describe("cassandra", function()
         local ok, err = session:execute([[
           INSERT INTO type_test_table (key, value)
           VALUES (?, ?)
-        ]], {"key", type.insert_value})
+        ]], {"key", type.insert_value ~= nil and type.insert_value or type.value})
         assert.same(nil, err)
         local rows, err = session:execute("SELECT value FROM type_test_table WHERE key = 'key'")
         assert.same(1, #rows)
         if type.read_test then
           assert.truthy(type.read_test(rows[1].value))
         else
-          assert.same(type.read_value, rows[1].value)
+          assert.same(type.read_value ~= nil and type.read_value or type.value, rows[1].value)
         end
       end)
       after_each(function()
